@@ -1843,6 +1843,77 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
     } finally { cleanup(); vi.unstubAllGlobals() }
   })
 
+  it('lyric/online resolves cached QQ files (qq-<mid>-*.ogg) by songmid, not by filename', async () => {
+    // 缓存文件被加入歌单/旧曲库后以「本地曲目」播放：/lyric/online 应识别
+    // 新格式文件名反解 songmid，直接走 QQ 歌词（QRC 优先），而不是拿技术名
+    // 去在线匹配（永远拆不出歌名 → 无歌词）。
+    const { handler, home, cleanup } = boot({
+      files: { 'Music/qq-000Bxmoz0acJuC-O801000Bxmoz0acJuC000Bxmoz0acJuC.ogg': 'CACHEOGG' },
+    })
+    const cachePath = join(home, 'Music', 'qq-000Bxmoz0acJuC-O801000Bxmoz0acJuC000Bxmoz0acJuC.ogg')
+    {
+      const r0 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/playlist', body: JSON.stringify({ name: 'P' }) }), r0)
+      const id = JSON.parse(r0.body).playlist.id
+      const r1 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/playlist/add', body: JSON.stringify({ id, paths: [cachePath] }) }), r1)
+    }
+    const qrcText = '<QrcInfos>\n[500,2000]晴天(500,700)到(1200,600)\n</QrcInfos>'
+    const stub = makeStub({
+      qqSongInfo: songInfo(97773, '晴天', '周杰伦', 269),
+      qqQrc: { code: 0, req: { code: 0, data: { lyric: QRC.encryptHex(qrcText), qrc_t: 1761231326, lrc_t: 0, trans: '', trans_t: 0 } } },
+      qqLyric: { retcode: 0, lyric: '[00:01.00]不该走LRC\n' }, // 不应被用到
+      qqSearch: [], lrclib: [], // 文件名匹配路径不应触发
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent(cachePath) }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.source).toBe('qq-qrc')
+      expect(body.matched.via).toBe('cache-songmid')
+      expect(body.matched.songmid).toBe('000Bxmoz0acJuC')
+      expect(body.wordLines.length).toBeGreaterThan(0)
+      expect(stub.calls.qqSearch).toBe(0) // 未走文件名在线搜索
+      expect(stub.calls.lrclib).toBe(0)
+      expect(stub.calls.qqSongInfo).toBe(1)
+      expect(stub.calls.qqQrc).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('lyric/online resolves legacy online-cache/qq/<mid>/<file> by songmid', async () => {
+    const { handler, home, cleanup } = boot({})
+    const legacyPath = join(home, 'Music', 'online-cache', 'qq', '004Z8Ion3y4eBx', 'O801004Z8Ion3y4eBx004Z8Ion3y4eBx.ogg')
+    mkdirSync(join(home, 'Music', 'online-cache', 'qq', '004Z8Ion3y4eBx'), { recursive: true })
+    writeFileSync(legacyPath, 'LEGACYOGG')
+    {
+      const r0 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/playlist', body: JSON.stringify({ name: 'P2' }) }), r0)
+      const id = JSON.parse(r0.body).playlist.id
+      const r1 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/playlist/add', body: JSON.stringify({ id, paths: [legacyPath] }) }), r1)
+    }
+    const stub = makeStub({
+      qqSongInfo: null, // 数字 ID 解析失败 → 回落普通 LRC
+      qqLyric: { retcode: 0, lyric: '[00:01.00]旧缓存也有歌词\n', trans: '' },
+    })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent(legacyPath) }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.matched.via).toBe('cache-songmid')
+      expect(body.matched.songmid).toBe('004Z8Ion3y4eBx')
+      expect(body.lrc[0].text).toContain('旧缓存也有歌词')
+      expect(stub.calls.qqSearch).toBe(0)
+      expect(stub.calls.qqLyric).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
   it('returns 400 for a missing path and 403 for an unregistered path', async () => {
     const { handler, musicDir, cleanup } = boot({ musicFiles: { 'song.mp3': 'M' } })
     try {
