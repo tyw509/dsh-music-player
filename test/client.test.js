@@ -400,6 +400,15 @@ async function fetchStub(url, opts) {
     if (pl) { pl.count = 0; pl.missing = 0; pl.tracks = [] }
     return jsonRes({ ok: true, cleared: 1, playlist: pl })
   }
+  if (u === '/dsh-music/cache/stats') {
+    return jsonRes({ ok: true, dir: 'E:\\Music', count: 2, bytes: 3 * 1024 * 1024, files: [
+      { name: 'qq-songAAA-O801songAAAsongAAA.ogg', size: 2 * 1024 * 1024, songmid: 'songAAA', title: '晴天', artist: '周杰伦' },
+      { name: 'qq-songBBB-M800songBBBsongBBB.mp3', size: 1024 * 1024, songmid: 'songBBB', title: '七里香', artist: '周杰伦' },
+    ] })
+  }
+  if (u === '/dsh-music/cache/clear' && o && o.method === 'POST') {
+    return jsonRes({ ok: true, removed: 2, bytes: 3 * 1024 * 1024 })
+  }
   return jsonRes({})
 }
 
@@ -11080,6 +11089,17 @@ describe('dsh-music-player client render smoke', () => {
       })
       return row === undefined || row === null ? [] : [...row.querySelectorAll('.dsh-music-config-seg-btn')]
     }
+    // 缓存管理卡片：拉取 stats 后显示已缓存歌曲数 + 歌名列表 + 清空按钮。
+    // （fetchStub 对 /dsh-music/cache/stats 返回 2 首：晴天/七里香，共 3MB。）
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)) })
+    const cacheListRows = [...container.querySelectorAll('.dsh-music-cache-list-row')]
+    expect(cacheListRows.length).toBe(2)
+    expect(cacheListRows[0].querySelector('.dsh-music-cache-list-name').textContent).toContain('晴天')
+    expect(cacheListRows[1].querySelector('.dsh-music-cache-list-name').textContent).toContain('七里香')
+    const cacheClearBtn = [...container.querySelectorAll('.dsh-music-config-btn')].find((b) => b.textContent === '清空缓存')
+    expect(cacheClearBtn).toBeTruthy()
+    expect(cacheClearBtn.disabled).toBe(false)
+
     const fxSegs = segOf('歌词动效')
     expect(fxSegs.map((b) => b.textContent)).toEqual(['无动效', '上滑淡入', '模糊浮入', '卡拉OK'])
     expect(fxSegs.findIndex((b) => b.classList.contains('on'))).toBe(0)
@@ -11111,11 +11131,13 @@ describe('dsh-music-player client render smoke', () => {
     expect(posPost).toBeTruthy()
     expect(posPost.prefs['dsh-music-bar-pos']).toBe('bottom')
     expect(prefsServer['dsh-music-bar-pos']).toBe('bottom')
-    // 复位操作：切到悬浮模式才出现「重置位置」按钮
-    expect(container.querySelector('.dsh-music-config-btn')).toBeNull()
+    // 复位操作：切到悬浮模式才出现「重置位置」按钮（按文本定位——系统配置里
+    // 还有缓存管理的「刷新/清空缓存」按钮，同属 .dsh-music-config-btn）。
+    const resetBtnOf = () => [...container.querySelectorAll('.dsh-music-config-btn')].find((b) => b.textContent === '重置位置')
+    expect(resetBtnOf()).toBeUndefined()
     act(() => { posSegs[2].dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 950)) })
-    const resetBtn = container.querySelector('.dsh-music-config-btn')
+    const resetBtn = resetBtnOf()
     expect(resetBtn).toBeTruthy()
     expect(resetBtn.disabled).toBe(true) // 还没拖动过 → 无可重置
     // 这一组是系统配置的**最后一项**（落位选择与逐项显示开关不是一类，放最下方）
@@ -13290,7 +13312,7 @@ describe('播放条显示位置', () => {
     // 配置页「重置位置」：清掉记忆坐标 → 回到默认贴右下角（无内联 left/top）
     act(() => { [...container.querySelectorAll('.dsh-music-tab')].find((b) => b.textContent === '系统配置').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
-    const resetBtn = container.querySelector('.dsh-music-config-btn')
+    const resetBtn = [...container.querySelectorAll('.dsh-music-config-btn')].find((b) => b.textContent === '重置位置')
     expect(resetBtn).toBeTruthy()
     expect(resetBtn.disabled).toBe(false)      // 有坐标 → 可重置
     act(() => { resetBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
