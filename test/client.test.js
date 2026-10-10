@@ -11059,16 +11059,17 @@ describe('dsh-music-player client render smoke', () => {
     act(() => { configTab.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
 
-    // six toggle rows (歌词显示 / 歌词面板透明 / 频谱显示 / 音质徽章显示 / 进度条显示 / 播放条背景显示)，
-    // 默认全开；跑马灯/边缘渐隐是内置行为，不再提供开关。
+    // seven toggle rows (歌词显示 / 歌词面板透明 / 频谱显示 / 音质徽章显示 / 进度条显示 /
+    // 播放条背景显示 / 缓存开关)，默认全开；跑马灯/边缘渐隐是内置行为，不再提供开关。
     const toggles = [...container.querySelectorAll('.dsh-music-toggle')]
-    expect(toggles.length).toBe(6)
+    expect(toggles.length).toBe(7)
     expect(toggles[0].getAttribute('aria-checked')).toBe('true') // 歌词显示
     expect(toggles[1].getAttribute('aria-checked')).toBe('true') // 歌词面板透明（默认开，紧跟歌词卡片下方）
     expect(toggles[2].getAttribute('aria-checked')).toBe('true') // 频谱显示
     expect(toggles[3].getAttribute('aria-checked')).toBe('true') // 音质徽章显示
     expect(toggles[4].getAttribute('aria-checked')).toBe('true') // 进度条显示
     expect(toggles[5].getAttribute('aria-checked')).toBe('true') // 播放条背景显示
+    expect(toggles[6].getAttribute('aria-checked')).toBe('true') // 缓存开关（默认开）
 
     // 歌词动效分段选择器：四个选项，默认 none（无动效）选中。
     // 按「配置行标签」定位该行内的分段按钮（新增「播放条位置」行后不能再按全局下标取）。
