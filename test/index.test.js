@@ -1876,6 +1876,8 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
       expect(body.matched.via).toBe('cache-songmid')
       expect(body.matched.songmid).toBe('000Bxmoz0acJuC')
       expect(body.wordLines.length).toBeGreaterThan(0)
+      // interval 兜底：单曲详情已知总秒数随 payload 返回，客户端用它修 0:00 总时长。
+      expect(body.interval).toBe(269)
       expect(stub.calls.qqSearch).toBe(0) // 未走文件名在线搜索
       expect(stub.calls.lrclib).toBe(0)
       expect(stub.calls.qqSongInfo).toBe(1)

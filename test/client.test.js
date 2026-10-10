@@ -5441,6 +5441,76 @@ describe('dsh-music-player client render smoke', () => {
     } finally { lyricOnlineFixture = null }
   })
 
+  it('缓存歌曲本地播放：/lyric/online 返回 interval 时兜底总时长（修 0:00）', async () => {
+    // 缓存文件（qq-<mid>-*.ogg）以本地曲目播放：/lyric 无 .lrc → /lyric/online
+    // 按 songmid 取词并返回单曲 interval。浏览器拿不到 OGG 流时长（audio.duration
+    // 非有限值）→ 客户端应用兜底 duration，播放条不再显示 0:00。
+    lyricOnlineFixture = {
+      ok: true, hasLyric: true, source: 'qq-qrc',
+      interval: 269,
+      wordLines: [{ t: 0, end: 4.5, text: '第一句歌词' }],
+      matched: { via: 'cache-songmid', songmid: '003T9lQH27ZmUA' },
+    }
+    const audios = []
+    class FxAudio2 extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
+    manifest = baseManifest()
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', FxAudio2)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = {
+      inject: (name, cb) => { cb() },
+      register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef },
+    }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => fn() })
+    await new Promise((r) => setTimeout(r, 0))
+    const audio = audios[0]
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    act(() => { root.render(React.createElement('div', null, bar, panel)) })
+    act(() => { container.querySelector('button[title="打开播放列表"]').dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    const track = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('a.mp3'))
+    act(() => { track.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    audio.duration = NaN // 模拟 OGG 高音质流拿不到时长
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // 等歌词两段 fetch（/lyric → /lyric/online）完成
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    try {
+      // 歌词在闲置态显示（缓存歌曲修复歌词的回归防护）
+      const outer = container.querySelector('.dsh-music-bar-lyric')
+      expect(outer).toBeTruthy()
+      expect(outer.textContent).toBe('第一句歌词')
+      // 鼠标进入右端热区 → 操作态：时长显示
+      const hotspot = container.querySelector('.dsh-music-bar-hotspot')
+      await act(async () => {
+        hotspot.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      })
+      const ctrls = container.querySelector('.dsh-music-bar-controls')
+      const timeEl = ctrls ? ctrls.querySelector('.dsh-music-bar-time') : null
+      expect(timeEl ? timeEl.textContent : null).toContain('4:29')
+    } finally {
+      vi.unstubAllGlobals()
+      lyricOnlineFixture = null
+    }
+  })
+
   it('falls back to the online lyric when a local track has no .lrc (no source badge)', async () => {
     // 本地无同名 .lrc（/lyric 返回 hasLrc:false）→ 客户端自动请求 /dsh-music/lyric/online
     // （Host 走 QQ → LRCLIB 兜底）；取到词后直接显示歌词，不显示歌词来源标识。
