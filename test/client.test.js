@@ -136,6 +136,8 @@ let lyricFixture = null
 let lyricOnlineFixture = null
 // test hook: /dsh-music/qq/lyric?songmid= response (QQ lyric + optional trans).
 let qqLyricFixture = null
+// test hook: /dsh-music/qq/songinfo?songmid= 反查结果（songmid → { title, artist }）。
+let qqSongInfoFixture = null
 // ---- Host prefs mirror (the client's authoritative store is the Host; old
 // localStorage is only a read-backup + upgrade migration source) ----
 // `prefsServer` is the test's view of the Host's music-player-prefs.json.
@@ -257,6 +259,14 @@ async function fetchStub(url, opts) {
   }
   if (u.startsWith('/dsh-music/qq/lyric?songmid=')) {
     return jsonRes(qqLyricFixture || { ok: false, error: 'no lyric' })
+  }
+  // 单曲信息反查（songmid → 歌名/歌手）：本地列表里的 QQ 缓存文件按歌名展示。
+  // qqSongInfoFixture 可按 songmid 定制；缺省返回空 title/artist（ok 仍为 true）。
+  if (u.startsWith('/dsh-music/qq/songinfo?songmid=')) {
+    const mid = new URL('http://x' + u).searchParams.get('songmid') || ''
+    const rec = (typeof qqSongInfoFixture === 'object' && qqSongInfoFixture && qqSongInfoFixture[mid])
+      || { title: '', artist: '' }
+    return jsonRes({ ok: true, songmid: mid, title: rec.title, artist: rec.artist })
   }
   if (u === '/dsh-music/qq/fav' && o && o.method === 'POST') {
     try { favCalls.push(JSON.parse(o.body || '{}')) } catch {}
@@ -5439,6 +5449,72 @@ describe('dsh-music-player client render smoke', () => {
       expect(container.querySelector('.dsh-music-bar-lyric').textContent).toBe('再见了朋友')
       expect(fxEl2.style.backgroundPositionX).toBe('53.33%')   // f=1000/4000
     } finally { lyricOnlineFixture = null }
+  })
+
+  it('本地列表里的 QQ 缓存文件按歌名展示：懒反查 songinfo，反查后刷新为「歌名 + 歌手」', async () => {
+    // 歌单里加入一个缓存产物（qq-<mid>-*.ogg，技术命名）：列表先显示文件名 +
+    // 「QQ缓存」徽标，随后 /dsh-music/qq/songinfo 反查成功 → 刷新为真实歌名 + 歌手 tag。
+    qqSongInfoFixture = { '003T9lQH27ZmUA': { title: '晴天', artist: '周杰伦' } }
+    const audios = []
+    class CAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
+    manifest = baseManifest()
+    // 「我最喜欢」歌单含一首缓存产物（技术命名文件名）+ 一首普通文件
+    manifest.playlists = [
+      makePlaylist('pl-fav', '我最喜欢', true, [
+        '/music/qq-003T9lQH27ZmUA-O801.ogg',
+        '/music/a.mp3',
+      ]),
+    ]
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', CAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => { fn() } })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    try {
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      // 打开「我最喜欢」歌单（baseManifest 的 pl-fav，已含一条缓存文件成员）
+      act(() => {
+        const tab = [...container.querySelectorAll('.dsh-music-subtab')].find((b) => b.textContent.includes('我最喜欢'))
+        tab.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      })
+      await tick()
+      // 反查完成后（同步 stub 一个 tick 内 resolve）：缓存行刷新为「歌名 + 歌手」，
+      // 技术命名文件名与「QQ缓存」徽标消失。
+      const row = [...container.querySelectorAll('.dsh-music-playlist-row')].find((r) => r.textContent.includes('晴天'))
+      expect(row).toBeTruthy()
+      expect(row.textContent).toContain('周杰伦')
+      expect(row.textContent).not.toContain('QQ缓存')
+      expect(row.textContent).not.toContain('qq-003T9lQH27ZmUA')
+      // 反查失败（未提供 fixture 的 mid）时保留文件名原文 + 徽标（回退路径不丢信息）
+      const rowPlain = [...container.querySelectorAll('.dsh-music-playlist-row')].find((r) => r.textContent.includes('a.mp3'))
+      expect(rowPlain).toBeTruthy()
+      expect(rowPlain.textContent).toContain('a.mp3')
+      expect(rowPlain.textContent).not.toContain('QQ缓存')
+    } finally {
+      qqSongInfoFixture = null
+      root.unmount()
+      container.remove()
+    }
   })
 
   it('缓存歌曲本地播放：/lyric/online 返回 interval 时兜底总时长（修 0:00）', async () => {

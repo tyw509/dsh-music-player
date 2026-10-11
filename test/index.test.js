@@ -2204,6 +2204,75 @@ describe('dsh-music-player QQ lyric sidecar cache (缓存歌曲连歌词一起�
   })
 })
 
+describe('dsh-music-player QQ songinfo reverse lookup (缓存歌曲名反查)', () => {
+  // /dsh-music/qq/songinfo 复用 cacheSongInfo：QQ 单曲信息接口（fcg_play_single_song）
+  // 反查 songmid → 歌名/歌手，供本地列表/歌单把技术命名的缓存文件（qq-<mid>-*.ogg）
+  // 展示成可读歌名。30 分钟进程内缓存（含失败结果）。
+  function songInfoStub(songs = {}) {
+    const calls = { songinfo: 0 }
+    const fn = async (url) => {
+      const u = String(url)
+      if (u.includes('fcg_play_single_song.fcg')) {
+        calls.songinfo++
+        const mid = (u.split('songmid=')[1] || '').split('&')[0]
+        const song = songs[mid] || null
+        if (!song) return { ok: true, status: 200, json: async () => ({ code: -1, data: [] }) }
+        return { ok: true, status: 200, json: async () => ({ code: 0, data: [{ ...song, id: song.id || 1 }] }) }
+      }
+      throw new Error('unexpected stub url: ' + u)
+    }
+    fn.calls = calls
+    return fn
+  }
+
+  it('resolves songmid -> title/artist via the QQ single-song info endpoint', async () => {
+    const { handler, cleanup } = boot()
+    vi.stubGlobal('fetch', songInfoStub({ S1: { mid: 'S1', name: '晴天', singer: [{ name: '周杰伦' }], album: { name: '' } } }))
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/songinfo?songmid=S1' }), res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body)
+      expect(body.ok).toBe(true)
+      expect(body.songmid).toBe('S1')
+      expect(body.title).toBe('晴天')
+      expect(body.artist).toBe('周杰伦')
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('returns empty title/artist (ok:true) for an unknown songmid, and 400 for a bad one', async () => {
+    const { handler, cleanup } = boot()
+    vi.stubGlobal('fetch', songInfoStub({}))
+    try {
+      const res1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/songinfo?songmid=NOPE' }), res1)
+      expect(res1.status).toBe(200)
+      const b1 = JSON.parse(res1.body)
+      expect(b1.ok).toBe(true)
+      expect(b1.title).toBe('')
+      expect(b1.artist).toBe('')
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/songinfo?songmid=bad/_chars' }), res2)
+      expect(res2.status).toBe(400)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('caches the lookup for 30 minutes (repeat request does not hit the endpoint again)', async () => {
+    const { handler, cleanup } = boot()
+    const stub = songInfoStub({ S1: { mid: 'S1', name: '晴天', singer: [{ name: '周杰伦' }], album: { name: '' } } })
+    vi.stubGlobal('fetch', stub)
+    try {
+      const r1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/songinfo?songmid=S1' }), r1)
+      expect(JSON.parse(r1.body).title).toBe('晴天')
+      const r2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/songinfo?songmid=S1' }), r2)
+      expect(JSON.parse(r2.body).title).toBe('晴天')
+      expect(stub.calls.songinfo).toBe(1) // 第二次命中 30min 缓存，不再出网
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+})
+
 describe('dsh-music-player book text route', () => {
   it('returns the plain text of a chunk from /book/<id>/text?from=n', async () => {
     const text = '第一章 开始。\n这是正文第一块，内容足够长以便分块。'
