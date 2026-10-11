@@ -1918,6 +1918,64 @@ describe('dsh-music-player client render smoke', () => {
     }
   })
 
+  it('播放条里的 QQ 缓存文件按歌名展示：懒反查 songinfo，刷新为「歌名 - 歌手」', async () => {
+    // 把缓存产物当本地曲目播放（当前名 = 技术命名文件名）：播放条先显示文件名，
+    // /dsh-music/qq/songinfo 反查成功后刷新为真实歌名 + 歌手（不影响进度持久化，
+    // store.currentName 仍是文件名）。
+    qqSongInfoFixture = { '003T9lQH27ZmUA': { title: '晴天', artist: '周杰伦' } }
+    const audios = []
+    class BarAudio extends FakeAudio {
+      constructor() { super(); audios.push(this) }
+      emit(type) { (this.listeners[type] || []).forEach((fn) => fn({ target: this })) }
+    }
+    vi.resetModules(); registered = []; lastFilesUrl = null; prefsPosts = []
+    manifest = baseManifest()
+    manifest.tracks = [{ id: '0', name: 'qq-003T9lQH27ZmUA-O801003T9lQH27ZmUA.ogg', url: '/dsh-music/0', size: 10, ext: 'ogg', path: '/music/qq-003T9lQH27ZmUA-O801003T9lQH27ZmUA.ogg' }]
+    manifest.count = 1
+    window.__ModuleLoader__ = { load: (def) => { factory = def.factory } }
+    vi.stubGlobal('Audio', BarAudio)
+    vi.stubGlobal('fetch', fetchStub)
+    vi.stubGlobal('requestAnimationFrame', () => 0)
+    vi.stubGlobal('cancelAnimationFrame', () => {})
+    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: '' }))
+    vi.stubGlobal('setInterval', () => 0)
+    vi.stubGlobal('clearInterval', () => {})
+    window.confirm = () => true
+    window.prompt = () => null
+    await import('../lib/client.js')
+    const modExports = factory((name) => (name === 'react' ? React : undefined))
+    const slots = { inject: (name, cb) => { cb() }, register: (meta, ef) => { registered.push({ id: meta.id, elementFactory: ef }); return ef } }
+    modExports.apply({ get: (k) => (k === 'slots' ? slots : undefined), effect: (fn) => { fn() } })
+    await new Promise((r) => setTimeout(r, 0))
+    const bar = registered.find((r) => r.id === 'music-player-bar').elementFactory()
+    const panel = registered.find((r) => r.id === 'music-player-panel').elementFactory()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const tick = () => act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    try {
+      act(() => { root.render(React.createElement('div', null, bar, panel)) })
+      const row = [...container.querySelectorAll('.dsh-music-track')].find((b) => b.textContent.includes('qq-003T9lQH27ZmUA'))
+      expect(row).toBeTruthy()
+      act(() => { row.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      // 反查前：播放条显示文件名（去扩展名）
+      let barName = container.querySelector('.dsh-music-bar-name-text')
+      expect(barName.textContent).toContain('qq-003T9lQH27ZmUA')
+      // 等反查 resolve（同步 stub，一个 tick 内完成）→ 播放条刷新为歌名 + 歌手
+      await tick()
+      await tick()
+      barName = container.querySelector('.dsh-music-bar-name-text')
+      expect(barName.textContent).toContain('晴天')
+      expect(barName.textContent).not.toContain('qq-003T9lQH27ZmUA')
+      // 歌手在 .dsh-music-bar-artist 内层（播放条名称区：歌名 - 歌手）
+      expect(barName.parentElement.textContent).toContain('周杰伦')
+    } finally {
+      qqSongInfoFixture = null
+      root.unmount()
+      container.remove()
+    }
+  })
+
   it('opens the panel on clicking the bar name (track) or the idle title', async () => {
     // 单击播放条左侧名称（有曲目时的 .dsh-music-bar-name）或停止状态的怠速标题
     // .dsh-music-bar-idle「DSH音乐播放器」→ 打开面板弹窗（再单击关闭，toggle）——
