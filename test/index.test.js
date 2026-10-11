@@ -2038,6 +2038,172 @@ describe('dsh-music-player /lyric/online route (本地无歌词 → 在线兜底
   })
 })
 
+describe('dsh-music-player QQ lyric sidecar cache (缓存歌曲连歌词一起落盘)', () => {
+  // 复用 /lyric/online describe 里的 stub 形状：QRC 逐字 + 单曲详情（fcg_play_single_song）。
+  function lyricStub({ qqSongInfo = null, qqQrc = null, qqLyric = null }) {
+    const calls = { qqLyric: 0, qqSongInfo: 0, qqQrc: 0 }
+    const fn = async (url, opts = {}) => {
+      const u = String(url)
+      if (u.includes('fcg_play_single_song.fcg')) {
+        calls.qqSongInfo++
+        return { ok: true, status: 200, json: async () => (qqSongInfo === null ? { code: 0, data: [] } : { code: 0, data: [qqSongInfo] }) }
+      }
+      if (u.includes('musicu.fcg')) {
+        let module_ = ''
+        try { module_ = JSON.parse(opts.body).req.module } catch {}
+        if (module_ !== 'music.musichallSong.PlayLyricInfo') throw new Error('unexpected musicu module: ' + module_)
+        calls.qqQrc++
+        return { ok: true, status: 200, json: async () => (qqQrc || { code: 0, req: { code: 0, data: {} } }) }
+      }
+      if (u.includes('fcg_query_lyric_new')) {
+        calls.qqLyric++
+        return { ok: true, status: 200, json: async () => (qqLyric || { retcode: -1, lyric: '' }) }
+      }
+      throw new Error('unexpected stub url: ' + u)
+    }
+    fn.calls = calls
+    return fn
+  }
+  // 把缓存目录指到 temp home 下（默认 E:\Music 不能污染真实环境），并落一个音频缓存文件。
+  const useCacheDir = async (handler, home) => {
+    const cacheDir = join(home, 'cache')
+    const res = makeRes()
+    await handler(makeReq({ method: 'POST', url: '/dsh-music/prefs', body: JSON.stringify({ prefs: { 'dsh-music-cache-dir': cacheDir } }) }), res)
+    expect(JSON.parse(res.body).ok).toBe(true)
+    return cacheDir
+  }
+  const putCacheAudio = (cacheDir, mid, prefix) => {
+    mkdirSync(cacheDir, { recursive: true })
+    const file = join(cacheDir, 'qq-' + mid + '-' + prefix + '.ogg')
+    writeFileSync(file, 'CACHEOGG')
+    return file
+  }
+  const qrcPayloadStub = () => {
+    const qrcText = '<QrcInfos>\n[500,2000]晴天(500,700)到(1200,600)\n</QrcInfos>'
+    return {
+      qqSongInfo: { id: 97773, mid: 'S1', name: '晴天', interval: 269, singer: [{ name: '周杰伦' }], album: { name: '专辑' } },
+      qqQrc: { code: 0, req: { code: 0, data: { lyric: QRC.encryptHex(qrcText), qrc_t: 1761231326, lrc_t: 0, trans: '', trans_t: 0 } } },
+      qqLyric: { retcode: 0, lyric: '[00:01.00]不该走LRC\n' },
+    }
+  }
+
+  it('qq/lyric writes a sidecar file when the song has an audio cache; repeat request is zero-network', async () => {
+    const { handler, home, cleanup } = boot()
+    const cacheDir = await useCacheDir(handler, home)
+    putCacheAudio(cacheDir, 'S1', 'O801')
+    const stub = lyricStub(qrcPayloadStub())
+    vi.stubGlobal('fetch', stub)
+    try {
+      // 第一次：在线取词成功 + 顺手落盘伴生歌词
+      const res1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res1)
+      const body1 = JSON.parse(res1.body)
+      expect(body1.ok).toBe(true)
+      expect(body1.source).toBe('qq-qrc')
+      expect(body1.wordLines.length).toBeGreaterThan(0)
+      expect(stub.calls.qqQrc).toBe(1)
+      const sidecarFile = join(cacheDir, 'qq-lyric-S1.json')
+      expect(existsSync(sidecarFile)).toBe(true)
+      const sc = JSON.parse(readFileSync(sidecarFile, 'utf8'))
+      expect(sc.ok).toBe(true)
+      expect(sc.wordLines.length).toBeGreaterThan(0)
+      expect(sc.interval).toBe(269)
+      expect(sc.ts).toBeGreaterThan(0)
+      // 第二次：命中伴生文件，零网络（三个桩接口都不应再被调用）
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res2)
+      const body2 = JSON.parse(res2.body)
+      expect(body2.ok).toBe(true)
+      expect(body2.source).toBe('qq-qrc')
+      expect(body2.wordLines).toEqual(sc.wordLines)
+      expect(stub.calls.qqQrc).toBe(1)
+      expect(stub.calls.qqLyric).toBe(0)
+      expect(stub.calls.qqSongInfo).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('qq/lyric does NOT write a sidecar when the song has no audio cache', async () => {
+    const { handler, home, cleanup } = boot()
+    const cacheDir = await useCacheDir(handler, home)
+    const stub = lyricStub(qrcPayloadStub())
+    vi.stubGlobal('fetch', stub)
+    try {
+      const res = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res)
+      expect(JSON.parse(res.body).ok).toBe(true)
+      // 没有音频缓存文件 → 歌词不跟着落盘（避免缓存目录堆无对应音频的歌词）
+      expect(existsSync(join(cacheDir, 'qq-lyric-S1.json'))).toBe(false)
+      expect(stub.calls.qqQrc).toBe(1)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('lyric/online cache branch serves the sidecar with zero network', async () => {
+    const { handler, home, cleanup } = boot()
+    const cacheDir = await useCacheDir(handler, home)
+    const audioPath = putCacheAudio(cacheDir, 'S1', 'O801')
+    // 把缓存文件加入歌单（isRegisteredAudioPath 守卫）
+    {
+      const r0 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/playlist', body: JSON.stringify({ name: 'PL' }) }), r0)
+      const id = JSON.parse(r0.body).playlist.id
+      const r1 = makeRes()
+      await handler(makeReq({ method: 'POST', url: '/dsh-music/playlist/add', body: JSON.stringify({ id, paths: [audioPath] }) }), r1)
+      expect(JSON.parse(r1.body).ok).toBe(true)
+    }
+    // 先在线取词一次 → 落盘伴生歌词
+    const stub1 = lyricStub(qrcPayloadStub())
+    vi.stubGlobal('fetch', stub1)
+    const res1 = makeRes()
+    await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res1)
+    expect(JSON.parse(res1.body).source).toBe('qq-qrc')
+    expect(existsSync(join(cacheDir, 'qq-lyric-S1.json'))).toBe(true)
+    vi.unstubAllGlobals()
+    // 再次请求 /lyric/online：命中伴生歌词，零网络（用会抛错的 stub 验证没有出网）
+    vi.stubGlobal('fetch', async () => { throw new Error('should not fetch') })
+    try {
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/lyric/online?path=' + encodeURIComponent(audioPath) }), res2)
+      const body2 = JSON.parse(res2.body)
+      expect(res2.status).toBe(200)
+      expect(body2.ok).toBe(true)
+      expect(body2.source).toBe('qq-qrc')
+      expect(body2.matched.via).toBe('cache-sidecar')
+      expect(body2.matched.songmid).toBe('S1')
+      expect(body2.wordLines.length).toBeGreaterThan(0)
+      // interval 随 payload 回传（客户端用它兜底缓存文件播放的总时长）
+      expect(body2.interval).toBe(269)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+
+  it('an expired sidecar is refetched online and refreshed', async () => {
+    const { handler, home, cleanup } = boot()
+    const cacheDir = await useCacheDir(handler, home)
+    putCacheAudio(cacheDir, 'S1', 'O801')
+    const stub = lyricStub(qrcPayloadStub())
+    vi.stubGlobal('fetch', stub)
+    try {
+      // 第一次：在线取词 + 落盘
+      const res1 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res1)
+      expect(JSON.parse(res1.body).source).toBe('qq-qrc')
+      expect(stub.calls.qqQrc).toBe(1)
+      // 把 ts 改到 40 天前（> 30 天 TTL）
+      const sidecarFile = join(cacheDir, 'qq-lyric-S1.json')
+      const sc = JSON.parse(readFileSync(sidecarFile, 'utf8'))
+      sc.ts = Date.now() - 40 * 24 * 60 * 60 * 1000
+      writeFileSync(sidecarFile, JSON.stringify(sc), 'utf8')
+      // 第二次：伴生过期 → 重新在线取词并覆盖刷新
+      const res2 = makeRes()
+      await handler(makeReq({ url: '/dsh-music/qq/lyric?songmid=S1' }), res2)
+      expect(JSON.parse(res2.body).source).toBe('qq-qrc')
+      expect(stub.calls.qqQrc).toBe(2)
+      const sc2 = JSON.parse(readFileSync(sidecarFile, 'utf8'))
+      // ts 已被刷新为「现在」附近
+      expect(Date.now() - sc2.ts).toBeLessThan(60 * 1000)
+    } finally { cleanup(); vi.unstubAllGlobals() }
+  })
+})
+
 describe('dsh-music-player book text route', () => {
   it('returns the plain text of a chunk from /book/<id>/text?from=n', async () => {
     const text = '第一章 开始。\n这是正文第一块，内容足够长以便分块。'
